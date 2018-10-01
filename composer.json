@@ -3,7 +3,8 @@
     "description": "Migrate CMS blocks, pages through CSV files",
     "type": "magento2-module",
     "require": {
-        "league/csv": "^9.1"
+        "league/csv": "^9.1",
+        "tdk/core": "dev-master"
     },
     "authors": [
         {
