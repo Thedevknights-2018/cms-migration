@@ -3,6 +3,7 @@
 namespace TDK\CmsMigration\Command;
 
 use League\Csv\Reader;
+use League\Csv\Statement;
 use Symfony\Component\Console\Helper\ProgressBar;
 use TDK\CmsMigration\Helper\Data as CmsMigrationHelper;
 use TDK\Core\Command\AbstractCommand;
@@ -98,8 +99,8 @@ class ImportCmsCommand extends AbstractCommand
         $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
         $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_BLOCKS);
         $header = $reader->fetchOne();
-        $reader->setOffset(1);
-        $rows = $reader->fetchAssoc($header);
+        $stmt = (new Statement())->offset(1);
+        $rows = $stmt->process($reader, $header);
         $rows = iterator_to_array($rows);
 
         $data = [];
@@ -162,8 +163,8 @@ class ImportCmsCommand extends AbstractCommand
         $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
         $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_PAGES);
         $header = $reader->fetchOne();
-        $reader->setOffset(1);
-        $rows = $reader->fetchAssoc($header);
+        $stmt = (new Statement())->offset(1);
+        $rows = $stmt->process($reader, $header);
         $rows = iterator_to_array($rows);
 
         $data = [];
