@@ -4,6 +4,7 @@
     <module name="TDK_CmsMigration" setup_version="2.0.0">
         <sequence>
             <module name="Magento_Cms"/>
+            <module name="Gene_BlueFoot"/>
         </sequence>
     </module>
 </config>

@@ -28,27 +28,39 @@ class ExportCmsCommand extends Command
      */
     protected $pageFactory;
     /**
+     * @var \Gene\BlueFoot\Api\EntityRepositoryInterface
+     */
+    protected $blueFootEntityRepository;
+    /**
      * @var \Magento\Framework\Api\SearchCriteriaBuilder
      */
     protected $searchCriteriaBuilder;
+    /**
+     * @var \Gene\BlueFoot\Model\Stage\TemplateFactory
+     */
+    protected $templateFactory;
 
     public function __construct(
         \TDK\CmsMigration\Helper\Data $cmsMigrationHelper,
         \Magento\Cms\Model\BlockFactory $blockFactory,
         \Magento\Cms\Model\PageFactory $pageFactory,
-        \Magento\Framework\Api\SearchCriteriaBuilder $searchCriteriaBuilder
+        \Gene\BlueFoot\Api\EntityRepositoryInterface $blueFootEntityRepository,
+        \Magento\Framework\Api\SearchCriteriaBuilder $searchCriteriaBuilder,
+        \Gene\BlueFoot\Model\Stage\TemplateFactory $templateFactory
     ) {
         parent::__construct();
         $this->cmsMigrationHelper = $cmsMigrationHelper;
         $this->blockFactory = $blockFactory;
         $this->pageFactory = $pageFactory;
+        $this->blueFootEntityRepository = $blueFootEntityRepository;
         $this->searchCriteriaBuilder = $searchCriteriaBuilder;
+        $this->templateFactory = $templateFactory;
     }
 
     protected function configure()
     {
         $this->setName('cms:export');
-        $this->setDescription('Export CMS blocks, pages to CSV');
+        $this->setDescription('Export CMS blocks, pages, bluefoot to CSV');
 
         parent::configure();
     }
@@ -79,6 +91,8 @@ class ExportCmsCommand extends Command
     {
         $this->exportCmsBlocks($input, $output);
         $this->exportCmsPages($input, $output);
+        $this->exportBlueFoot($input, $output);
+        $this->exportBlueFootTemplates($input, $output);
     }
 
     /**
@@ -129,6 +143,59 @@ class ExportCmsCommand extends Command
             }
 
             $writer->insertOne($pageData);
+            $output->writeln('Done');
+        }
+    }
+
+    /**
+     * @param \Symfony\Component\Console\Input\InputInterface   $input
+     * @param \Symfony\Component\Console\Output\OutputInterface $output
+     */
+    private function exportBlueFoot(InputInterface $input, OutputInterface $output)
+    {
+        $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
+        $writer = Writer::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_BLUEFOOT, 'w');
+        $hasHeader = false;
+        $searchCriteria = $this->searchCriteriaBuilder->create();
+        $entities = $this->blueFootEntityRepository->getList($searchCriteria)->getItems();
+
+        /** @var \Gene\BlueFoot\Model\Entity $entity */
+        foreach ($entities as $entity) {
+            $output->write(sprintf('Exporting bluefoot id %s... ', $entity->getEntityId()));
+            $entityData = $this->cmsMigrationHelper->getBlueFootDataAsArray($entity);
+
+            if ($hasHeader === false) {
+                $writer->insertOne(array_keys($entityData));
+                $hasHeader = true;
+            }
+
+            $writer->insertOne($entityData);
+            $output->writeln('Done');
+        }
+    }
+
+    /**
+     * @param \Symfony\Component\Console\Input\InputInterface   $input
+     * @param \Symfony\Component\Console\Output\OutputInterface $output
+     */
+    private function exportBlueFootTemplates(InputInterface $input, OutputInterface $output)
+    {
+        $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
+        $writer = Writer::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_TEMPLATES, 'w');
+        $hasHeader = false;
+        $templates = $this->templateFactory->create()->getCollection();
+
+        /** @var \Gene\BlueFoot\Model\Stage\Template $template */
+        foreach ($templates as $template) {
+            $output->write(sprintf('Exporting template id %s... ', $template->getId()));
+            $templateData = $this->cmsMigrationHelper->getTemplateDataAsArray($template);
+
+            if ($hasHeader === false) {
+                $writer->insertOne(array_keys($templateData));
+                $hasHeader = true;
+            }
+
+            $writer->insertOne($templateData);
             $output->writeln('Done');
         }
     }

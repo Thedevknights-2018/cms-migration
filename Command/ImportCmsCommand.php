@@ -4,6 +4,7 @@ namespace TDK\CmsMigration\Command;
 
 use League\Csv\Reader;
 use Symfony\Component\Console\Helper\ProgressBar;
+use Symfony\Component\Console\Question\ConfirmationQuestion;
 use TDK\CmsMigration\Helper\Data as CmsMigrationHelper;
 use TDK\Core\Command\AbstractCommand;
 
@@ -15,9 +16,21 @@ use TDK\Core\Command\AbstractCommand;
 class ImportCmsCommand extends AbstractCommand
 {
     /**
+     * @var array
+     */
+    protected $blueFootEntityIdMapping = [];
+    /**
      * @var \TDK\CmsMigration\Helper\Data
      */
     protected $cmsMigrationHelper;
+    /**
+     * @var \Gene\BlueFoot\Api\Data\EntityInterfaceFactory
+     */
+    protected $blueFootEntityFactory;
+    /**
+     * @var \Gene\BlueFoot\Api\EntityRepositoryInterface
+     */
+    protected $entityRepository;
     /**
      * @var \Magento\Cms\Model\BlockFactory
      */
@@ -35,6 +48,10 @@ class ImportCmsCommand extends AbstractCommand
      */
     protected $pageRepository;
     /**
+     * @var \Gene\BlueFoot\Model\Stage\TemplateFactory
+     */
+    protected $templateFactory;
+    /**
      * @var \Magento\Framework\App\ResourceConnection
      */
     private $resourceConnection;
@@ -44,18 +61,24 @@ class ImportCmsCommand extends AbstractCommand
     public function __construct(
         \Magento\Framework\App\ObjectManagerFactory $objectManagerFactory,
         \TDK\CmsMigration\Helper\Data $cmsMigrationHelper,
+        \Gene\BlueFoot\Api\Data\EntityInterfaceFactory $blueFootEntityFactory,
+        \Gene\BlueFoot\Api\EntityRepositoryInterface $entityRepository,
         \Magento\Cms\Model\BlockFactory $blockFactory,
         \Magento\Cms\Api\BlockRepositoryInterface $blockRepository,
         \Magento\Cms\Model\PageFactory $pageFactory,
         \Magento\Cms\Api\PageRepositoryInterface $pageRepository,
+        \Gene\BlueFoot\Model\Stage\TemplateFactory $templateFactory,
         \Magento\Framework\App\ResourceConnection $resourceConnection
     ) {
         parent::__construct($objectManagerFactory);
         $this->cmsMigrationHelper = $cmsMigrationHelper;
+        $this->blueFootEntityFactory = $blueFootEntityFactory;
+        $this->entityRepository = $entityRepository;
         $this->blockFactory = $blockFactory;
         $this->blockRepository = $blockRepository;
         $this->pageFactory = $pageFactory;
         $this->pageRepository = $pageRepository;
+        $this->templateFactory = $templateFactory;
         $this->resourceConnection = $resourceConnection;
     }
 
@@ -75,6 +98,17 @@ class ImportCmsCommand extends AbstractCommand
             return;
         }
 
+        $helper = $this->getHelper('question');
+        $question = new ConfirmationQuestion('<question>This will clear all Bluefoot entities. Are you sure? (y/n) </question>', false);
+
+        if (!$helper->ask($this->getInput(), $this->getOutput(), $question)) {
+            return;
+        }
+
+        $this->clearBlueFoot();
+        $bluefootIds = $this->extractBlueFoot();
+        $this->importBlueFoot($bluefootIds);
+        $this->importBlueFootTemplates();
         $this->importCmsBlocks();
         $this->importCmsPages();
     }
@@ -87,7 +121,137 @@ class ImportCmsCommand extends AbstractCommand
         $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
 
         return file_exists($cmsDirectory.CmsMigrationHelper::FILE_BLOCKS)
-            && file_exists($cmsDirectory.CmsMigrationHelper::FILE_PAGES);
+            && file_exists($cmsDirectory.CmsMigrationHelper::FILE_PAGES)
+            && file_exists($cmsDirectory.CmsMigrationHelper::FILE_BLUEFOOT);
+    }
+
+    private function clearBlueFoot()
+    {
+        $this->writeln('<info>Truncating Bluefoot entity tables</info>');
+        $connection = $this->resourceConnection->getConnection();
+
+        $tables = [
+            'gene_bluefoot_entity',
+            'gene_bluefoot_entity_datetime',
+            'gene_bluefoot_entity_decimal',
+            'gene_bluefoot_entity_int',
+            'gene_bluefoot_entity_text',
+            'gene_bluefoot_entity_varchar',
+            'gene_bluefoot_stage_template',
+        ];
+        $connection->query('SET FOREIGN_KEY_CHECKS=0');
+        foreach ($tables as $table) {
+            $tableName = $connection->getTableName($table);
+            $connection->truncateTable($tableName);
+        }
+        $connection->query('SET FOREIGN_KEY_CHECKS=1');
+    }
+
+    private function importBlueFoot(array $bluefootIds)
+    {
+        $this->writeln('<info>Importing Bluefoot entities</info>');
+
+        $this->writeln('Reading file');
+        $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
+        $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_BLUEFOOT);
+        $header = $reader->fetchOne();
+        $reader->setOffset(1);
+        $rows = $reader->fetchAssoc($header);
+        $rows = iterator_to_array($rows);
+
+        $data = [];
+        $lines = [];
+        $progress = $this->getProgressBar($rows);
+        foreach ($rows as $line => $row) {
+            $progress->advance();
+
+            $id = $row['entity_id'];
+            unset($row['entity_id']);
+
+            if (!in_array($id, $bluefootIds)) {
+                continue;
+            }
+
+            $data[$id] = $row;
+            $lines[$id] = $line;
+        }
+        $progress->finish();
+        $this->writeln('');
+
+        $this->writeln('Saving bluefoot entities to database');
+        $errors = [];
+        $progress = $this->getProgressBar($data);
+        foreach ($data as $id => $item) {
+            $progress->advance();
+
+            try {
+                /** @var \Gene\BlueFoot\Model\Entity $entity */
+                $entity = $this->blueFootEntityFactory->create();
+                $entity->setData($item);
+                $entity = $this->entityRepository->save($entity);
+                $this->newIdMap[$id] = $entity->getId();
+            } catch (\Magento\Framework\Exception\CouldNotSaveException $e) {
+                $errors[] = sprintf(
+                    '<error>ERROR: Cannot save line %s. Entity ID: %s.</error> Data: %s',
+                    $lines[$id],
+                    $id,
+                    json_encode($item)
+                );
+            }
+        }
+        $progress->finish();
+        $this->writeln('');
+        foreach ($errors as $error) {
+            $this->writeln($error);
+        }
+        $this->writeln('Done');
+    }
+
+    private function importBlueFootTemplates()
+    {
+        $this->writeln('<info>Importing Bluefoot templates</info>');
+
+        $this->writeln('Reading file');
+        $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
+        $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_TEMPLATES);
+        $header = $reader->fetchOne();
+        $reader->setOffset(1);
+        $rows = $reader->fetchAssoc($header);
+        $rows = iterator_to_array($rows);
+
+        $data = [];
+        $lines = [];
+        $progress = $this->getProgressBar($rows);
+        foreach ($rows as $line => $row) {
+            $progress->advance();
+
+            unset($row['template_id']);
+
+            $oldStructure = $row['structure'];
+            $newStructure = preg_replace_callback('/("entity_id":")(\d+)(")/', [$this, 'replace'], $oldStructure);
+            $row['structure'] = $newStructure;
+
+            $name = $row['name'];
+            if (!array_key_exists($name, $data)) {
+                $data[$name] = $row;
+                $lines[$name] = $line;
+            }
+        }
+        $progress->finish();
+        $this->writeln('');
+
+        $this->writeln('Saving bluefoot templates to database');
+        $progress = $this->getProgressBar($data);
+        foreach ($data as $name => $item) {
+            $progress->advance();
+            $template = $this->templateFactory->create();
+            $template->addData($item);
+            $template->save();
+        }
+        $progress->finish();
+        $this->writeln('');
+
+        $this->writeln('Done');
     }
 
     private function importCmsBlocks()
@@ -109,6 +273,14 @@ class ImportCmsCommand extends AbstractCommand
             $progress->advance();
 
             unset($row['block_id']);
+
+            if (strpos($row['content'], CmsMigrationHelper::NEEDLE_BLUEFOOT_CONTENT) !== false) {
+                $row['content'] = preg_replace_callback(
+                    '/("entityId":")(\d+)(")/',
+                    [$this, 'replace'],
+                    $row['content']
+                );
+            }
 
             $data[$row['identifier']] = $row;
             $lines[$row['identifier']] = $line;
@@ -173,6 +345,14 @@ class ImportCmsCommand extends AbstractCommand
             $progress->advance();
 
             unset($row['page_id']);
+
+            if (strpos($row['content'], CmsMigrationHelper::NEEDLE_BLUEFOOT_CONTENT) !== false) {
+                $row['content'] = preg_replace_callback(
+                    '/("entityId":")(\d+)(")/',
+                    [$this, 'replace'],
+                    $row['content']
+                );
+            }
 
             $data[$row['identifier']] = $row;
             $lines[$row['identifier']] = $line;
@@ -247,4 +427,54 @@ class ImportCmsCommand extends AbstractCommand
         return $progress;
     }
 
+    private function extractBlueFoot()
+    {
+        $this->writeln('Collecting bluefoot entity');
+        $bluefootIds = [];
+
+        $cmsDirectory = $this->cmsMigrationHelper->getCmsDirectory();
+
+        $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_TEMPLATES);
+        $header = $reader->fetchOne();
+        $reader->setOffset(1);
+        $rows = $reader->fetchAssoc($header);
+        $data = [];
+        foreach ($rows as $row) {
+            $data[$row['name']] = $row['structure'];
+        }
+        foreach ($data as $name => $structure) {
+            preg_match_all('/("entity_id":")(\d+)(")/', $structure, $matches);
+            $bluefootIds = array_merge($bluefootIds, $matches[2]);
+        }
+
+        $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_BLOCKS);
+        $header = $reader->fetchOne();
+        $reader->setOffset(1);
+        $rows = $reader->fetchAssoc($header);
+        $data = [];
+        foreach ($rows as $line => $row) {
+            $data[$row['identifier']] = $row['content'];
+        }
+        foreach ($data as $name => $content) {
+            preg_match_all('/("entityId":")(\d+)(")/', $content, $matches);
+            $bluefootIds = array_merge($bluefootIds, $matches[2]);
+        }
+
+        $reader = Reader::createFromPath($cmsDirectory.CmsMigrationHelper::FILE_PAGES);
+        $header = $reader->fetchOne();
+        $reader->setOffset(1);
+        $rows = $reader->fetchAssoc($header);
+        $data = [];
+        foreach ($rows as $line => $row) {
+            $data[$row['identifier']] = $row['content'];
+        }
+        foreach ($data as $name => $content) {
+            preg_match_all('/("entityId":")(\d+)(")/', $content, $matches);
+            $bluefootIds = array_merge($bluefootIds, $matches[2]);
+        }
+
+        $bluefootIds = array_unique($bluefootIds);
+
+        return $bluefootIds;
+    }
 }
