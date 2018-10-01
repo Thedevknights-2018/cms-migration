@@ -4,7 +4,7 @@
     "type": "magento2-module",
     "require": {
         "league/csv": "^9.1",
-        "tdk/core": "dev-master"
+        "tdk/core": "*"
     },
     "authors": [
         {
